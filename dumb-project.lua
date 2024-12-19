@@ -8,6 +8,7 @@ local ctx = {
     this_file_patterns = nil,
     this_workspace = nil,
     this_build_commands = nil,
+    created_bindings = {}
 }
 
 local PROJECTS_DIRECTORY = vim.fs.normalize(vim.fn.stdpath('config')) .. '/dumb-project/'
@@ -265,6 +266,45 @@ local function recursive_open_files_in_dir(dir_name, patterns, in_read_only)
     end
 
     traverse_directory(dir_name)
+end
+
+
+local function does_keybinding_exist(key)
+    local keymaps = vim.api.nvim_get_keymap('n')
+    for _, keymap in ipairs(keymaps) do
+        if keymap.lhs == key then
+            return true
+        end
+    end
+    return false
+end
+
+
+local function create_key_bindings(build_commands)
+    for _, build_command in ipairs(build_commands) do
+        local binding = build_command.binding
+        local command = function()
+            async_command_run(build_command.command())
+        end
+
+        vim.keymap.set('n', binding, command, { silent = true })
+
+        if not does_keybinding_exist(binding) then
+            print("Error binding", binding .. ":", tostring(command))
+        else
+            table.insert(ctx.created_bindings, binding)
+        end
+    end
+end
+
+
+local function clear_key_bindings()
+    for _, key in ipairs(ctx.created_bindings) do
+        pcall(function()
+            vim.api.nvim_del_keymap('n', key)
+        end)
+    end
+    ctx.created_bindings = {}
 end
 
 
@@ -606,6 +646,8 @@ function API.load()
         vim.fn.chdir(workspace.working_dir)
         vim.fn.execute("buffer " .. ctx.this_config)
         print("Opened all files in project")
+
+        create_key_bindings(ctx.this_build_commands)
     end
 
     vim.api.nvim_buf_set_keymap(buf, 'n', '<C-p>', '', { noremap = true, silent = true, callback = move_up      })
@@ -722,6 +764,7 @@ function API.unload()
     ctx.this_file_patterns = nil
     ctx.this_workspace = nil
     ctx.this_build_commands = nil
+    clear_key_bindings()
     close_saved_buffers()
     vim.fn.chdir(PROJECTS_DIRECTORY)
     netrw_open_dir(PROJECTS_DIRECTORY)
