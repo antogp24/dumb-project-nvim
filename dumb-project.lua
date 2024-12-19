@@ -3,94 +3,62 @@
 -- ----------------------------------------------------------------------------------------------- --
 
 local ctx = {
-    this_project_path = nil,
-    this_project_config = nil,
-    this_project_file_patterns = nil,
-    this_project_workspace = nil,
-    this_project_build_commands = nil,
-    projects_directory = vim.fs.normalize(vim.fn.stdpath('config')) .. '/dumb-project/',
+    this_path = nil,
+    this_config = nil,
+    this_file_patterns = nil,
+    this_workspace = nil,
+    this_build_commands = nil,
 }
+
+local PROJECTS_DIRECTORY = vim.fs.normalize(vim.fn.stdpath('config')) .. '/dumb-project/'
 
 -- Default contents of the config file.
 -- ----------------------------------------------------------------------------------------------- --
 
-local DEFAULT_CONFIG_STRUCTURE = [[
+local function make_default_config_file_header()
+    local current_date = os.date("%d-%m-%Y %H:%M:%S")
+    return string.format("-- Project config file created at %s\n", current_date)
+end
 
-local project = require('dumb-project')
-
--- I'm so sorry, this is how pattern matching functions work in lua:
--- https://www.lua.org/manual/5.1/manual.html#5.4.1
--- Function to assist with the most common case:
-local function with_ext(ext) return ".*%" .. ext .. "$" end
-
--- List of accepted file patterns.
-
-file_patterns = {
-    with_ext(".c"),
-    with_ext(".odin"),
-    with_ext(".glsl"),
-    with_ext(".bat"),
-    with_ext(".sh"),
-}
-
--- List of folders to recursively scan.
-
-workspace = {
-    working_dir = "~/dev/project",
-    others = {
-        "~/libs/library1",
-        "~/libs/library2",
-        "~/libs/library3",
-    },
-}
-
--- List of build commands to use.
--- Each command must be a table{cmdname: string, command: function(returns_string), binding: string}.
--- The require('dumb-project').cmd function assists with creating commands by allowing strings and functions that return strings. 
--- The default working_dir for all commands is the workspace.working_dir.
-
-build_commands = {
-    {
-        cmdname = "Build",
-        command = project.cmd("build.bat"),
-        binding = "<F5>",
-    },
-    {
-        cmdname = "RunFile",
-        command = project.cmd("odin run ", project.get_current_file, " -file"),
-        binding = "<F6>",
-    },
-    {
-        cmdname = "CompileLibrary1",
-        command = project.cmd("make && sudo make install"),
-        binding = "<F6>",
-        working_dir = "~/libs/library1",
-    },
-}
-
--- Must call this function to use all the tables defined previously.
-project.setup(file_patterns, workspace, build_commands)
-]]
-
+local DEFAULT_CONFIG_FILE_BODY = require("default-config-file")
 
 -- Helper functions
 -- ----------------------------------------------------------------------------------------------- --
 
-local function log_msg(message)
-    local log_file = './log.txt'
-    local file = io.open(log_file, 'a')
-
-    if file then
-        file:write(message .. "\n")
-        file:close()
-    else
-        print("Error: Could not open log file for writing.")
+local function log_msg(message, no_newline)
+    local file = io.open('W:/dumb-project-nvim/log.txt', 'a')
+    if not file then
+        error("Error: Could not open log file for writing.")
+        return
     end
+    if no_newline then 
+        file:write(tostring(message))
+    else
+        file:write(tostring(message) .. "\n")
+    end
+    file:close()
 end
 
 
 local function file_exists(path)
     return vim.loop.fs_stat(path) and vim.loop.fs_stat(path).type == 'file'
+end
+
+
+local function netrw_open_dir(dir_path)
+    if vim.fn.isdirectory(dir_path) ~= 1 then
+        error('Could not open the directory: ' .. dir_path)
+        return
+    end
+    vim.cmd('Explore ' .. dir_path)
+end
+
+
+local function close_saved_buffers()
+    local buffers = vim.api.nvim_list_bufs()
+    for _, buf in ipairs(buffers) do
+        vim.api.nvim_buf_delete(buf, { force = false })
+    end
 end
 
 
@@ -107,6 +75,68 @@ local function table_size(t)
         count = count + 1
     end
     return count
+end
+
+
+local function table_sliced(t, start, finish)
+    local size = table_size(t)
+    if finish == nil then finish = size end
+
+    if start < 1 or finish > size then return end
+
+    local result = {}
+
+    for i = start, finish do
+        table.insert(result, t[i])
+    end
+
+    return result
+end
+
+
+local function list_print(t, print_fn)
+    if not print_fn then print_fn = print end
+    local result = "{"
+    for i,v in ipairs(t) do
+        if i > 1 then result = result .. ", " end
+        result = result .. tostring(v)
+    end
+    result = result .. "}"
+    print_fn(result)
+end
+
+
+local function table_print(t, print_fn, indent)
+    if not print_fn then print_fn = print end
+    if not indent then indent = 2 end
+    local spaces = string.rep(" ", indent)
+
+    print_fn(spaces .. "{")
+    for k, v in pairs(t) do
+        local formatting = spaces .. spaces .. k .. ": "
+        if type(v) == "table" then
+            print_fn(formatting)
+            table_print(v, print_fn, indent+2)
+        else
+            print_fn(formatting .. tostring(v))
+        end
+    end
+    print_fn(spaces .. "}")
+end
+
+
+local function async_command_run(command_list)
+    local command_args = table_sliced(command_list, 2, nil)
+
+    local handle, pid = vim.uv.spawn(command_list[1], {
+        args = command_args,
+        stdio = {stdin, stdout, stderr},
+        verbatim = true,
+        detached = true,
+        cwd = vim.fn.getcwd(),
+    })
+
+    print("handle: " .. tostring(handle) .. ", pid: " .. tostring(pid))
 end
 
 
@@ -195,14 +225,14 @@ end
 
 
 local function is_active()
-    return ctx.this_project_file_patterns ~= nil and ctx.this_project_workspace ~= nil and ctx.this_project_build_commands ~= nil
+    return ctx.this_file_patterns ~= nil and ctx.this_workspace ~= nil and ctx.this_build_commands ~= nil
 end
 
 
-local function clear_this_project_attribs()
-    ctx.this_project_workspace = nil
-    ctx.this_project_file_patterns = nil
-    ctx.this_project_build_commands = nil
+local function clear_this_attribs()
+    ctx.this_workspace = nil
+    ctx.this_file_patterns = nil
+    ctx.this_build_commands = nil
 end
 
 
@@ -238,71 +268,65 @@ local function recursive_open_files_in_dir(dir_name, patterns, in_read_only)
 end
 
 
-function table_print(t, print_fn, indent)
-    if not print_fn then print_fn = print end
-    if not indent then indent = 2 end
-    local spaces = string.rep(" ", indent)
+-- Commands
+-- ----------------------------------------------------------------------------------------------- --
 
-    print_fn(spaces .. "{")
-    for k, v in pairs(t) do
-        local formatting = spaces .. spaces .. k .. ": "
-        if type(v) == "table" then
-            print_fn(formatting)
-            table_print(v, print_fn, indent+2)
-        else
-            print_fn(formatting .. tostring(v))
-        end
-    end
-    print_fn(spaces .. "}")
-end
+vim.api.nvim_create_user_command('DumbProjectOpenProjectsDirNetrw', function()
+    print(require("dumb-project").netrw_open_projects_dir())
+end, {})
+
+vim.api.nvim_create_user_command('DumbProjectNew', function()
+    print(require("dumb-project").create_new_project())
+end, {})
+
+vim.api.nvim_create_user_command('DumbProjectLoad', function()
+    print(require("dumb-project").load())
+end, {})
+
+vim.api.nvim_create_user_command('DumbProjectUnload', function()
+    print(require("dumb-project").unload())
+end, {})
+
+vim.api.nvim_create_user_command('DumbProjectExec', function()
+    print(require("dumb-project").command_lister())
+end, {})
+
+vim.api.nvim_create_user_command('DumbProjectOpenConfig', function()
+    print(require("dumb-project").open_config())
+end, {})
+
+
+create_directory_if_needed(PROJECTS_DIRECTORY)
 
 -- API
 -- ----------------------------------------------------------------------------------------------- --
 
-local function get_current_file()
-    local filepath = vim.fn.expand('%:p')
-    return vim.fn.fnamemodify(filepath, ':~')
-end
+local API = {}
 
 
-local function open_projects_dir_with_netrw()
-    if vim.fn.isdirectory(ctx.projects_directory) == 1 then
-        vim.cmd('Explore ' .. ctx.projects_directory)
-    else
-        print('The directory', ctx.projects_directory, "doesn't exist. Restart neovim.")
-    end
-end
-
-
-local function setup(file_patterns, workspace, build_commands)
-    clear_this_project_attribs()
+function API.setup(file_patterns, workspace, build_commands)
+    clear_this_attribs()
 
     if validate_file_patterns(file_patterns) then
-        ctx.this_project_file_patterns = file_patterns
+        ctx.this_file_patterns = file_patterns
     end
     if validate_workspace(workspace) then
-        ctx.this_project_workspace = workspace
+        ctx.this_workspace = workspace
     end
-    if validate_build_commands(build_commands, ctx.this_project_workspace) then
-        ctx.this_project_build_commands = build_commands
+    if validate_build_commands(build_commands, ctx.this_workspace) then
+        ctx.this_build_commands = build_commands
     end
 
     if not is_active() then
-        clear_this_project_attribs()
+        clear_this_attribs()
         return false
     end
-
-    -- log_msg("----------------------------------------------")
-    -- table_print(ctx.this_project_file_patterns, log_msg)
-    -- table_print(ctx.this_project_workspace, log_msg)
-    -- table_print(ctx.this_project_build_commands, log_msg)
-    -- log_msg("----------------------------------------------")
 
     return true
 end
 
 
-local function make_build_command(...)
+function API.cmd(...)
     local num_args = select("#", ...)
     if num_args == 0 then
         error("Expected the function make_build_command to have arguments, but recieved none.")
@@ -311,25 +335,29 @@ local function make_build_command(...)
 
     for i = 1, num_args do
         local v = select(i, ...)
-        if type(v) ~= "string" and type(v) ~= "function" then
-            error("Expected strings or functions in require('dumb-project').cmd(...)")
+        local arg_type = type(v)
+
+        if arg_type ~= "string" and arg_type ~= "function" then
+            error("Expected strings or functions in require('dumb-project').cmd(...), but got " .. arg_type)
             return nil
-        elseif type(v) == "function" and type(v()) ~= "string" then
-            error("Functions in require('dumb-project').cmd(...) must return a string.")
-            return nil
+        elseif arg_type == "function" then
+            local return_type = type(v())
+            if return_type ~= "string" then
+                error("Functions in require('dumb-project').cmd(...) must return a string, but got " .. return_type)
+                return nil
+            end
         end
+
         table.insert(command_args, v)
     end
 
     return function()
-        local result = ""
-        log_msg("INNER: command_args:")
-        table_print(command_args, log_msg)
+        local result = {}
         for _,v in ipairs(command_args) do
             if type(v) == "function" then
-                result = result .. v()
+                table.insert(result, v())
             else
-                result = result .. v
+                table.insert(result, v)
             end
         end
         return result
@@ -337,8 +365,8 @@ local function make_build_command(...)
 end
 
 
-local function build_command_lister()
-    if ctx.this_project_build_commands == nil or table_size(ctx.this_project_build_commands) == 0 then
+function API.command_lister()
+    if ctx.this_build_commands == nil or table_size(ctx.this_build_commands) == 0 then
         print("No available build commands.")
         return
     end
@@ -348,7 +376,7 @@ local function build_command_lister()
     local max_cmdname_length = 0
     local build_commands_count = 0
 
-    for _,v in ipairs(ctx.this_project_build_commands) do
+    for _,v in ipairs(ctx.this_build_commands) do
         local cmdname = v["cmdname"]
         local cmdname_length = string.len(cmdname)
         if cmdname_length > max_cmdname_length then
@@ -434,42 +462,27 @@ local function build_command_lister()
         vim.api.nvim_win_set_cursor(win, {current_index, 0})
         local cmdname = vim.api.nvim_buf_get_lines(buf, current_index-1, current_index, false)[1]
         local build = corresponding_build_command[cmdname]
-        local command_string = build.command()
-
         close_dialog()
 
-        if vim.fn.isdirectory(build.working_dir) ~= 1 then
-            log_msg(build.working_dir .. " is not a valid directory.")
-            return
-        end
-        log_msg("Executing command: " .. command_string .. " (BEFORE CHDIR)")
-        vim.fn.chdir(build.working_dir)
-
-        log_msg("Executing command: " .. command_string)
-        local result = vim.fn.system(command_string)
-        log_msg("Got result: " .. result)
-
-        if vim.v.shell_error ~= 0 then
-            log_msg("Command failed with exit code " .. vim.v.shell_error .. ": " .. result)
-            return
-        end
+        local command_list = build.command()
+        async_command_run(command_list)
     end
 
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-p>', '', { noremap = true, silent = true, callback = move_up })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-n>', '', { noremap = true, silent = true, callback = move_down })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'k',     '', { noremap = true, silent = true, callback = move_up })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'j',     '', { noremap = true, silent = true, callback = move_down })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<CR>',  '', { noremap = true, silent = false, callback = execute })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-c>', '', { noremap = true, silent = true, callback = close_dialog })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<Esc>', '', { noremap = true, silent = true, callback = close_dialog })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'q',     '', { noremap = true, silent = true, callback = close_dialog })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-p>', '', { noremap = true, silent = true,  callback = move_up      })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-n>', '', { noremap = true, silent = true,  callback = move_down    })
+    vim.api.nvim_buf_set_keymap(buf, 'n', 'k',     '', { noremap = true, silent = true,  callback = move_up      })
+    vim.api.nvim_buf_set_keymap(buf, 'n', 'j',     '', { noremap = true, silent = true,  callback = move_down    })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<CR>',  '', { noremap = true, silent = false, callback = execute      })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-c>', '', { noremap = true, silent = true,  callback = close_dialog })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<Esc>', '', { noremap = true, silent = true,  callback = close_dialog })
+    vim.api.nvim_buf_set_keymap(buf, 'n', 'q',     '', { noremap = true, silent = true,  callback = close_dialog })
 
     vim.api.nvim_win_set_cursor(win, {current_index, 0})
 end
 
 
-local function load_project()
-    local files = vim.fn.readdir(ctx.projects_directory)
+function API.load()
+    local files = vim.fn.readdir(PROJECTS_DIRECTORY)
 
     local lua_files = {}
     local lua_files_count = 0
@@ -564,32 +577,42 @@ local function load_project()
         vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
     end
 
-    local function open_file()
+    local function open_config()
         local config_filename = lua_files[current_index]
-        ctx.this_project_config = ctx.projects_directory .. config_filename
+        ctx.this_config = PROJECTS_DIRECTORY .. config_filename
 
-        vim.fn.execute("edit " .. ctx.this_project_config)
+        vim.fn.execute("edit " .. ctx.this_config)
         close_dialog()
-        vim.fn.execute("buffer " .. ctx.this_project_config)
+        vim.fn.execute("buffer " .. ctx.this_config)
         vim.api.nvim_command('luafile %')
 
-        if not is_active() then return end
-
-        local workspace = ctx.this_project_workspace
-        recursive_open_files_in_dir(workspace.working_dir, ctx.this_project_file_patterns)
-        for _,_ in ipairs(workspace.others) do
-            recursive_open_files_in_dir(workspace.working_dir, ctx.this_project_file_patterns)
+        if not is_active() then 
+            error("At the end in " .. ctx.this_config .. " you must call the setup function.")
+            return
         end
 
-        vim.fn.execute("buffer " .. ctx.this_project_config)
-        print("Open all files in project")
+        local workspace = ctx.this_workspace
+
+        if vim.fn.isdirectory(workspace.working_dir) ~= 1 then
+            error(build.working_dir .. " is not a valid directory.")
+            return
+        end
+
+        recursive_open_files_in_dir(workspace.working_dir, ctx.this_file_patterns)
+        for _,_ in ipairs(workspace.others) do
+            recursive_open_files_in_dir(workspace.working_dir, ctx.this_file_patterns, true)
+        end
+
+        vim.fn.chdir(workspace.working_dir)
+        vim.fn.execute("buffer " .. ctx.this_config)
+        print("Opened all files in project")
     end
 
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-p>', '', { noremap = true, silent = true, callback = move_up })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-n>', '', { noremap = true, silent = true, callback = move_down })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'k',     '', { noremap = true, silent = true, callback = move_up })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'j',     '', { noremap = true, silent = true, callback = move_down })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<CR>',  '', { noremap = true, silent = true, callback = open_file })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-p>', '', { noremap = true, silent = true, callback = move_up      })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-n>', '', { noremap = true, silent = true, callback = move_down    })
+    vim.api.nvim_buf_set_keymap(buf, 'n', 'k',     '', { noremap = true, silent = true, callback = move_up      })
+    vim.api.nvim_buf_set_keymap(buf, 'n', 'j',     '', { noremap = true, silent = true, callback = move_down    })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<CR>',  '', { noremap = true, silent = true, callback = open_config  })
     vim.api.nvim_buf_set_keymap(buf, 'n', '<C-c>', '', { noremap = true, silent = true, callback = close_dialog })
     vim.api.nvim_buf_set_keymap(buf, 'n', '<Esc>', '', { noremap = true, silent = true, callback = close_dialog })
     vim.api.nvim_buf_set_keymap(buf, 'n', 'q',     '', { noremap = true, silent = true, callback = close_dialog })
@@ -598,7 +621,7 @@ local function load_project()
 end
 
 
-local function new_project()
+function API.create_new_project()
     local terminal_w = vim.o.columns
     local terminal_h = vim.o.lines
     local popup_w = 30
@@ -664,74 +687,60 @@ local function new_project()
         if not is_filename_valid(user_input) then return end
 
         -- Opening the file (Created if it doesn't exist)
-        local config_path = ctx.projects_directory .. string.gsub(user_input, ' ', '_') .. '.lua'
+        local config_path = PROJECTS_DIRECTORY .. string.gsub(user_input, ' ', '_') .. '.lua'
 
         if not file_exists(config_path) then
             local config_file = io.open(config_path, 'a')
             if not config_file then return end
-            config_file:write(DEFAULT_CONFIG_STRUCTURE)
+            config_file:write(make_default_config_file_header())
+            config_file:write(DEFAULT_CONFIG_FILE_BODY)
             config_file:close()
         end
         
         vim.fn.execute("edit " .. config_path)
-        ctx.this_project_config = config_path
+        ctx.this_config = config_path
     end
 
     vim.api.nvim_buf_set_keymap(buf, 'i', '<CR>',  '', { noremap = true, silent = true, callback = confirm })
-    vim.api.nvim_buf_set_keymap(buf, 'i', '<C-c>', '', { noremap = true, silent = true, callback = cancel })
-    vim.api.nvim_buf_set_keymap(buf, 'i', '<Esc>', '', { noremap = true, silent = true, callback = cancel })
+    vim.api.nvim_buf_set_keymap(buf, 'i', '<C-c>', '', { noremap = true, silent = true, callback = cancel  })
+    vim.api.nvim_buf_set_keymap(buf, 'i', '<Esc>', '', { noremap = true, silent = true, callback = cancel  })
 end
 
 
-local function open_project_config()
-    if ctx.this_project_config == nil then
+function API.open_config()
+    if ctx.this_config == nil then
         print("No active project.")
         return
     end
-    vim.fn.execute("edit " .. ctx.this_project_config)
+    vim.fn.execute("edit " .. ctx.this_config)
 end
 
 
--- Commands
--- ----------------------------------------------------------------------------------------------- --
-
-create_directory_if_needed(ctx.projects_directory)
-
-vim.api.nvim_create_user_command('DumbProjectOpenProjectsDirNetrw', function()
-    print(require("dumb-project").open_projects_dir_with_netrw())
-end, {})
-
-vim.api.nvim_create_user_command('DumbProjectNew', function()
-    print(require("dumb-project").new())
-end, {})
-
-vim.api.nvim_create_user_command('DumbProjectLoad', function()
-    print(require("dumb-project").load())
-end, {})
-
-vim.api.nvim_create_user_command('DumbProjectExec', function()
-    print(require("dumb-project").command_lister())
-end, {})
-
-vim.api.nvim_create_user_command('DumbProjectOpenConfig', function()
-    print(require("dumb-project").open_config())
-end, {})
+function API.unload()
+    ctx.this_path = nil
+    ctx.this_config = nil
+    ctx.this_file_patterns = nil
+    ctx.this_workspace = nil
+    ctx.this_build_commands = nil
+    close_saved_buffers()
+    vim.fn.chdir(PROJECTS_DIRECTORY)
+    netrw_open_dir(PROJECTS_DIRECTORY)
+end
 
 
--- Table of the module
--- ----------------------------------------------------------------------------------------------- --
+function API.netrw_open_projects_dir()
+    netrw_open_dir(PROJECTS_DIRECTORY)
+end
 
-local API_TABLE = {
-    get_current_file = get_current_file,
-    get_this_project_path = function() return ctx.this_project_file end,
-    open_projects_dir_with_netrw = open_projects_dir_with_netrw,
-    load = load_project,
-    new = new_project,
-    command_lister = build_command_lister,
-    open_config = open_project_config,
-    cmd = make_build_command,
-    is_active = is_active,
-    setup = setup,
-}
 
-return API_TABLE
+function API.get_current_file()
+    return vim.fn.expand('%:p')
+end
+
+
+function API.get_project_path()
+    return ctx.this_file
+end
+
+
+return API
