@@ -11,7 +11,16 @@ local ctx = {
     created_bindings = {}
 }
 
+
+-- Directory where project files are stored.
+-- ----------------------------------------------------------------------------------------------- --
+
 local PROJECTS_DIRECTORY = vim.fs.normalize(vim.fn.stdpath('config')) .. '/dumb-project/'
+
+if vim.fn.isdirectory(PROJECTS_DIRECTORY) ~= 1 then
+    vim.fn.mkdir(PROJECTS_DIRECTORY, 'p')
+end
+
 
 -- Default contents of the config file.
 -- ----------------------------------------------------------------------------------------------- --
@@ -126,31 +135,44 @@ local function table_print(t, print_fn, indent)
 end
 
 
-local function async_command_run(command_list)
-    local command_args = table_sliced(command_list, 2, nil)
+-- On unix:   bash -i -c '<command> ; read -p "Press Enter to exit..."'
+-- On win32:  cmd /K "<command> && pause"
 
-    local handle, pid = vim.uv.spawn(command_list[1], {
-        args = command_args,
+local function async_command_run(command_str)
+    local shell_name = nil
+    local shell_args = {}
+
+    if vim.fn.has("unix") == 1 then
+        shell_name = vim.fn.getenv('SHELL'):match("([^/]+)$")
+        table.insert(shell_args, "-i")
+        table.insert(shell_args, "-c")
+        table.insert(shell_args, "'" .. command_str .. " ; read -p \"Press Enter to exit...\"'")
+    elseif vim.fn.has("win32") == 1 then
+        shell_name = "cmd"
+        table.insert(shell_args, "/k")
+        table.insert(shell_args, '"' .. command_str .. " && pause\"")
+    end
+
+    vim.uv.spawn(shell_name, {
+        args = shell_args,
         stdio = {stdin, stdout, stderr},
         verbatim = true,
         detached = true,
         cwd = vim.fn.getcwd(),
     })
 
-    print("handle: " .. tostring(handle) .. ", pid: " .. tostring(pid))
+    -- Printing the full command
+    vim.api.nvim_out_write(shell_name)
+    for _,arg in ipairs(shell_args) do
+        vim.api.nvim_out_write(arg .. ' ')
+    end
+    vim.api.nvim_out_write('\n')
 end
 
 
 local function is_filename_valid(filename)
     if string.len(filename) == 0 then return false end
     return not string.match(filename, '[\\/:*?"<>|]')
-end
-
-
-local function create_directory_if_needed(path)
-    if vim.fn.isdirectory(path) ~= 1 then
-        vim.fn.mkdir(path, 'p')
-    end
 end
 
 
@@ -336,15 +358,14 @@ vim.api.nvim_create_user_command('DumbProjectOpenConfig', function()
 end, {})
 
 
-create_directory_if_needed(PROJECTS_DIRECTORY)
-
 -- API
 -- ----------------------------------------------------------------------------------------------- --
 
-local API = {}
+
+local M = {}
 
 
-function API.setup(file_patterns, workspace, build_commands)
+function M.setup(file_patterns, workspace, build_commands)
     clear_this_attribs()
 
     if validate_file_patterns(file_patterns) then
@@ -366,7 +387,7 @@ function API.setup(file_patterns, workspace, build_commands)
 end
 
 
-function API.cmd(...)
+function M.cmd(...)
     local num_args = select("#", ...)
     if num_args == 0 then
         error("Expected the function make_build_command to have arguments, but recieved none.")
@@ -392,12 +413,12 @@ function API.cmd(...)
     end
 
     return function()
-        local result = {}
+        local result = ""
         for _,v in ipairs(command_args) do
             if type(v) == "function" then
-                table.insert(result, v())
+                result = result .. v()
             else
-                table.insert(result, v)
+                result = result .. v
             end
         end
         return result
@@ -405,7 +426,7 @@ function API.cmd(...)
 end
 
 
-function API.command_lister()
+function M.command_lister()
     if ctx.this_build_commands == nil or table_size(ctx.this_build_commands) == 0 then
         print("No available build commands.")
         return
@@ -504,8 +525,8 @@ function API.command_lister()
         local build = corresponding_build_command[cmdname]
         close_dialog()
 
-        local command_list = build.command()
-        async_command_run(command_list)
+        local command_str = build.command()
+        async_command_run(command_str)
     end
 
     vim.api.nvim_buf_set_keymap(buf, 'n', '<C-p>', '', { noremap = true, silent = true,  callback = move_up      })
@@ -521,7 +542,7 @@ function API.command_lister()
 end
 
 
-function API.load()
+function M.load()
     local files = vim.fn.readdir(PROJECTS_DIRECTORY)
 
     local lua_files = {}
@@ -663,7 +684,7 @@ function API.load()
 end
 
 
-function API.create_new_project()
+function M.create_new_project()
     local terminal_w = vim.o.columns
     local terminal_h = vim.o.lines
     local popup_w = 30
@@ -749,7 +770,7 @@ function API.create_new_project()
 end
 
 
-function API.open_config()
+function M.open_config()
     if ctx.this_config == nil then
         print("No active project.")
         return
@@ -758,7 +779,7 @@ function API.open_config()
 end
 
 
-function API.unload()
+function M.unload()
     ctx.this_path = nil
     ctx.this_config = nil
     ctx.this_file_patterns = nil
@@ -771,19 +792,39 @@ function API.unload()
 end
 
 
-function API.netrw_open_projects_dir()
+function M.netrw_open_projects_dir()
     netrw_open_dir(PROJECTS_DIRECTORY)
 end
 
 
-function API.get_current_file()
+function M.get_current_file()
     return vim.fn.expand('%:p')
 end
 
 
-function API.get_project_path()
+function M.get_folder_of_current_file()
+    local file_path = vim.fs.normalize(vim.fn.expand('%:p'))
+    local file_path_len = string.len(file_path)
+
+    local last_slash_index = nil
+
+    for i = 1, file_path_len do
+        local c = string.char(file_path:byte(i))
+        if c == '/' then
+            last_slash_index = i
+        end
+    end
+    
+    if last_slash_index == nil then
+        return "."
+    end
+    return string.sub(file_path, 1, last_slash_index)
+end
+
+
+function M.get_project_path()
     return ctx.this_file
 end
 
 
-return API
+return M
