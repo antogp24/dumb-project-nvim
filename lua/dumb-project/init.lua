@@ -333,7 +333,7 @@ end
 
 
 local function create_centered_window_with_title(args)
-    if args.title == nil or args.popup_w == nil or args.popup_h == nil or args.can_edit.text == nil then
+    if args.title == nil or args.popup_w == nil or args.popup_h == nil or args.can_edit_text == nil then
         error("create_centered_window_with_title(args): args must have title, text, popup_w, popup_h, can_edit_text")
     end
 
