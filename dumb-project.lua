@@ -8,7 +8,9 @@ local ctx = {
     this_file_patterns = nil,
     this_workspace = nil,
     this_build_commands = nil,
-    created_bindings = {}
+    created_bindings = {},
+    plugin_commands = {},
+    plugin_commands_count = 0,
 }
 
 
@@ -330,32 +332,144 @@ local function clear_key_bindings()
 end
 
 
+local function create_centered_window_with_title(args)
+    if args.title == nil or args.text == nil or args.popup_w == nil or args.popup_h == nil or args.can_edit_text == nil then
+        error("create_centered_window_with_title(args): args must have title, text, popup_w, popup_h, can_edit_text")
+    end
+
+    local terminal_w = vim.o.columns
+    local terminal_h = vim.o.lines
+    local popup_w = clamp(args.popup_w, string.len(args.title), terminal_w)
+    local popup_h = math.min(args.popup_h, terminal_h)
+    local popup_x = math.floor((terminal_w - popup_w) / 2)
+    local popup_y = math.floor((terminal_h - popup_h) / 2)
+
+    -- Creating title read only window
+    local title_buf = vim.api.nvim_create_buf(false, true)
+    local title_win = vim.api.nvim_open_win(title_buf, true, {
+        relative = 'editor',
+        width = popup_w,
+        height = 1,
+        col = popup_x,
+        row = popup_y - 2,
+        style = 'minimal',
+        border = 'single',
+    })
+    vim.api.nvim_buf_set_lines(title_buf, 0, -1, false, {args.title})
+    vim.api.nvim_buf_set_option(title_buf, 'modifiable', false)
+    vim.api.nvim_buf_set_option(title_buf, 'buftype', 'nofile')
+
+    -- Creating pop-up
+    local buf = vim.api.nvim_create_buf(false, true)
+    local win = vim.api.nvim_open_win(buf, true, {
+        relative = 'editor',
+        width = popup_w,
+        height = popup_h,
+        col = popup_x,
+        row = popup_y,
+        style = 'minimal',
+        border = 'single',
+    })
+
+    if args.text ~= nil then
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, args.text)
+    end
+
+    vim.api.nvim_buf_set_option(buf, 'modifiable', args.can_edit_text)
+
+    if args.can_edit_text then
+        vim.api.nvim_command('startinsert')
+    end
+
+    return title_win, win, buf
+end
+
+
+local function create_navigation_window_bindings(buf, fn_up, fn_down, fn_action, fn_close)
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-p>', '', { noremap = true, silent = true, callback = fn_up     })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-n>', '', { noremap = true, silent = true, callback = fn_down   })
+    vim.api.nvim_buf_set_keymap(buf, 'n', 'k',     '', { noremap = true, silent = true, callback = fn_up     })
+    vim.api.nvim_buf_set_keymap(buf, 'n', 'j',     '', { noremap = true, silent = true, callback = fn_down   })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<CR>',  '', { noremap = true, silent = true, callback = fn_action })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-c>', '', { noremap = true, silent = true, callback = fn_close  })
+    vim.api.nvim_buf_set_keymap(buf, 'n', '<Esc>', '', { noremap = true, silent = true, callback = fn_close  })
+    vim.api.nvim_buf_set_keymap(buf, 'n', 'q',     '', { noremap = true, silent = true, callback = fn_close  })
+end
+
+
+local function destroy_navigation_window(buf, title_win, win)
+    vim.api.nvim_buf_del_keymap(buf, 'n', '<C-p>')
+    vim.api.nvim_buf_del_keymap(buf, 'n', '<C-n>')
+    vim.api.nvim_buf_del_keymap(buf, 'n', 'j')
+    vim.api.nvim_buf_del_keymap(buf, 'n', 'k')
+    vim.api.nvim_buf_del_keymap(buf, 'n', '<CR>')
+    vim.api.nvim_buf_del_keymap(buf, 'n', '<C-c>')
+    vim.api.nvim_buf_del_keymap(buf, 'n', '<Esc>')
+    vim.api.nvim_buf_del_keymap(buf, 'n', 'q')
+    vim.api.nvim_win_close(title_win, true)
+    vim.api.nvim_win_close(win, true)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
+end
+
+
+local function create_prompt_window_bindings(buf, fn_confirm, fn_cancel)
+    vim.api.nvim_buf_set_keymap(buf, 'i', '<CR>',  '', { noremap = true, silent = true, callback = fn_confirm })
+    vim.api.nvim_buf_set_keymap(buf, 'i', '<C-c>', '', { noremap = true, silent = true, callback = fn_cancel  })
+    vim.api.nvim_buf_set_keymap(buf, 'i', '<Esc>', '', { noremap = true, silent = true, callback = fn_cancel  })
+end
+
+
+local function destroy_prompt_window(buf, title_win, win)
+    vim.api.nvim_buf_del_keymap(buf, 'i', '<Esc>')
+    vim.api.nvim_buf_del_keymap(buf, 'i', '<C-c>')
+    vim.api.nvim_buf_del_keymap(buf, 'i', '<CR>')
+    vim.api.nvim_win_close(title_win, true)
+    vim.api.nvim_win_close(win, true)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
+end
+
+
 -- Commands
 -- ----------------------------------------------------------------------------------------------- --
 
-vim.api.nvim_create_user_command('DumbProjectOpenProjectsDirNetrw', function()
-    print(require("dumb-project").netrw_open_projects_dir())
-end, {})
+local ALL_PLUGIN_COMMANDS_LIST_NAME = "Commands"
 
-vim.api.nvim_create_user_command('DumbProjectNew', function()
-    print(require("dumb-project").create_new_project())
-end, {})
+local function create_command(name, fn)
+    vim.api.nvim_create_user_command('DumbProject' .. name, fn, {})
 
-vim.api.nvim_create_user_command('DumbProjectLoad', function()
-    print(require("dumb-project").load())
-end, {})
+    if name ~= ALL_PLUGIN_COMMANDS_LIST_NAME then
+        ctx.plugin_commands_count = ctx.plugin_commands_count + 1
+        table.insert(ctx.plugin_commands, {name = name, fn = fn})
+    end
+end
 
-vim.api.nvim_create_user_command('DumbProjectUnload', function()
-    print(require("dumb-project").unload())
-end, {})
+create_command(ALL_PLUGIN_COMMANDS_LIST_NAME, function()
+    require("dumb-project").all_plugin_commands()
+end)
 
-vim.api.nvim_create_user_command('DumbProjectExec', function()
-    print(require("dumb-project").command_lister())
-end, {})
+create_command('Load', function()
+    require("dumb-project").load()
+end)
 
-vim.api.nvim_create_user_command('DumbProjectOpenConfig', function()
-    print(require("dumb-project").open_config())
-end, {})
+create_command('Unload', function()
+    require("dumb-project").unload()
+end)
+
+create_command('New', function()
+    require("dumb-project").create_new_project()
+end)
+
+create_command('Exec', function()
+    require("dumb-project").command_lister()
+end)
+
+create_command('OpenConfig', function()
+    require("dumb-project").open_config()
+end)
+
+create_command('OpenProjectsDirNetrw', function()
+    require("dumb-project").netrw_open_projects_dir()
+end)
 
 
 -- API
@@ -448,42 +562,13 @@ function M.command_lister()
         build_commands_count = build_commands_count + 1
     end
 
-    local TITLE = "Build Commands"
-    local terminal_w = vim.o.columns
-    local terminal_h = vim.o.lines
-    local popup_w = clamp(max_cmdname_length, string.len(TITLE), terminal_w)
-    local popup_h = math.min(build_commands_count, terminal_h)
-    local popup_x = math.floor((terminal_w - popup_w) / 2)
-    local popup_y = math.floor((terminal_h - popup_h) / 2)
-
-    -- Creating title read only window
-    local title_buf = vim.api.nvim_create_buf(false, true)
-    local title_win = vim.api.nvim_open_win(title_buf, true, {
-        relative = 'editor',
-        width = popup_w,
-        height = 1,
-        col = popup_x,
-        row = popup_y - 2,
-        style = 'minimal',
-        border = 'single',
+    local title_win, win, buf = create_centered_window_with_title({
+        title = "Build Commands",
+        text = command_names,
+        popup_w = max_cmdname_length,
+        popup_h = build_commands_count,
+        can_edit_text = false,
     })
-    vim.api.nvim_buf_set_lines(title_buf, 0, -1, false, {TITLE})
-    vim.api.nvim_buf_set_option(title_buf, 'modifiable', false)
-    vim.api.nvim_buf_set_option(title_buf, 'buftype', 'nofile')
-
-    -- Creating pop-up
-    local buf = vim.api.nvim_create_buf(false, true)
-    local win = vim.api.nvim_open_win(buf, true, {
-        relative = 'editor',
-        width = popup_w,
-        height = popup_h,
-        col = popup_x,
-        row = popup_y,
-        style = 'minimal',
-        border = 'single',
-    })
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, command_names)
-    vim.api.nvim_buf_set_option(buf, 'modifiable', false)
 
     local current_index = 1
 
@@ -506,17 +591,7 @@ function M.command_lister()
     end
 
     local function close_dialog()
-        vim.api.nvim_buf_del_keymap(buf, 'n', '<C-p>')
-        vim.api.nvim_buf_del_keymap(buf, 'n', '<C-n>')
-        vim.api.nvim_buf_del_keymap(buf, 'n', 'j')
-        vim.api.nvim_buf_del_keymap(buf, 'n', 'k')
-        vim.api.nvim_buf_del_keymap(buf, 'n', '<CR>')
-        vim.api.nvim_buf_del_keymap(buf, 'n', '<C-c>')
-        vim.api.nvim_buf_del_keymap(buf, 'n', '<Esc>')
-        vim.api.nvim_buf_del_keymap(buf, 'n', 'q')
-        vim.api.nvim_win_close(title_win, true)
-        vim.api.nvim_win_close(win, true)
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
+        destroy_navigation_window(buf, title_win, win)
     end
 
     local function execute()
@@ -529,14 +604,64 @@ function M.command_lister()
         async_command_run(command_str)
     end
 
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-p>', '', { noremap = true, silent = true,  callback = move_up      })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-n>', '', { noremap = true, silent = true,  callback = move_down    })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'k',     '', { noremap = true, silent = true,  callback = move_up      })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'j',     '', { noremap = true, silent = true,  callback = move_down    })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<CR>',  '', { noremap = true, silent = false, callback = execute      })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-c>', '', { noremap = true, silent = true,  callback = close_dialog })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<Esc>', '', { noremap = true, silent = true,  callback = close_dialog })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'q',     '', { noremap = true, silent = true,  callback = close_dialog })
+    create_navigation_window_bindings(buf, move_up, move_down, execute, close_dialog)
+
+    vim.api.nvim_win_set_cursor(win, {current_index, 0})
+end
+
+
+function M.all_plugin_commands()
+    local max_name_length = 0
+    local plugin_command_names = {}
+    local plugin_command_functions = {}
+    for i,v in ipairs(ctx.plugin_commands) do
+        table.insert(plugin_command_names, v.name)
+        table.insert(plugin_command_functions, v.fn)
+        local name_length = string.len(v.name)
+        if name_length > max_name_length then
+            max_name_length = name_length
+        end
+    end
+
+    local title_win, win, buf = create_centered_window_with_title({
+        title = "All Dumb-Project Commands",
+        text = plugin_command_names,
+        popup_w = max_name_length,
+        popup_h = ctx.plugin_commands_count,
+        can_edit_text = false,
+    })
+
+    local current_index = 1
+
+    local function move_up()
+        if current_index > 1 then
+            current_index = current_index - 1
+        else
+            current_index = ctx.plugin_commands_count
+        end
+        vim.api.nvim_win_set_cursor(win, {current_index, 0})
+    end
+
+    local function move_down()
+        if current_index < ctx.plugin_commands_count then
+            current_index = current_index + 1
+        else
+            current_index = 1
+        end
+        vim.api.nvim_win_set_cursor(win, {current_index, 0})
+    end
+
+    local function close_dialog()
+        destroy_navigation_window(buf, title_win, win)
+    end
+
+    local function execute_plugin_command()
+        destroy_navigation_window(buf, title_win, win)
+        local fn = plugin_command_functions[current_index]
+        fn()
+    end
+
+    create_navigation_window_bindings(buf, move_up, move_down, execute_plugin_command, close_dialog)
 
     vim.api.nvim_win_set_cursor(win, {current_index, 0})
 end
@@ -566,43 +691,13 @@ function M.load()
         return
     end
 
-    local TITLE = "Projects"
-    local terminal_w = vim.o.columns
-    local terminal_h = vim.o.lines
-    local popup_w = clamp(max_file_name_length, string.len(TITLE), terminal_w)
-    local popup_h = math.min(lua_files_count, terminal_h)
-    local popup_x = math.floor((terminal_w - popup_w) / 2)
-    local popup_y = math.floor((terminal_h - popup_h) / 2)
-    
-    -- Creating title read only window
-    local title_buf = vim.api.nvim_create_buf(false, true)
-    local title_win = vim.api.nvim_open_win(title_buf, true, {
-        relative = 'editor',
-        width = popup_w,
-        height = 1,
-        col = popup_x,
-        row = popup_y - 2,
-        style = 'minimal',
-        border = 'single',
+    local title_win, win, buf = create_centered_window_with_title({
+        title = "Projects",
+        text = lua_files,
+        popup_w = max_file_name_length,
+        popup_h = lua_files_count,
+        can_edit_text = false,
     })
-    vim.api.nvim_buf_set_lines(title_buf, 0, -1, false, {TITLE})
-    vim.api.nvim_buf_set_option(title_buf, 'modifiable', false)
-    vim.api.nvim_buf_set_option(title_buf, 'buftype', 'nofile')
-
-    -- Creating pop-up
-    local buf = vim.api.nvim_create_buf(false, true)
-    local win = vim.api.nvim_open_win(buf, true, {
-        relative = 'editor',
-        width = popup_w,
-        height = popup_h,
-        col = popup_x,
-        row = popup_y,
-        style = 'minimal',
-        border = 'single',
-    })
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lua_files)
-    vim.api.nvim_buf_set_option(buf, 'modifiable', false)
-    vim.api.nvim_buf_set_option(buf, 'buftype', 'nofile')
 
     local current_index = 1
 
@@ -625,17 +720,7 @@ function M.load()
     end
 
     local function close_dialog()
-        vim.api.nvim_buf_del_keymap(buf, 'n', '<C-p>')
-        vim.api.nvim_buf_del_keymap(buf, 'n', '<C-n>')
-        vim.api.nvim_buf_del_keymap(buf, 'n', 'j')
-        vim.api.nvim_buf_del_keymap(buf, 'n', 'k')
-        vim.api.nvim_buf_del_keymap(buf, 'n', '<CR>')
-        vim.api.nvim_buf_del_keymap(buf, 'n', '<C-c>')
-        vim.api.nvim_buf_del_keymap(buf, 'n', '<Esc>')
-        vim.api.nvim_buf_del_keymap(buf, 'n', 'q')
-        vim.api.nvim_win_close(title_win, true)
-        vim.api.nvim_win_close(win, true)
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
+        destroy_navigation_window(buf, title_win, win)
     end
 
     local function open_config()
@@ -671,65 +756,23 @@ function M.load()
         create_key_bindings(ctx.this_build_commands)
     end
 
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-p>', '', { noremap = true, silent = true, callback = move_up      })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-n>', '', { noremap = true, silent = true, callback = move_down    })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'k',     '', { noremap = true, silent = true, callback = move_up      })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'j',     '', { noremap = true, silent = true, callback = move_down    })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<CR>',  '', { noremap = true, silent = true, callback = open_config  })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<C-c>', '', { noremap = true, silent = true, callback = close_dialog })
-    vim.api.nvim_buf_set_keymap(buf, 'n', '<Esc>', '', { noremap = true, silent = true, callback = close_dialog })
-    vim.api.nvim_buf_set_keymap(buf, 'n', 'q',     '', { noremap = true, silent = true, callback = close_dialog })
+    create_navigation_window_bindings(buf, move_up, move_down, open_config, close_dialog)
 
     vim.api.nvim_win_set_cursor(win, {current_index, 0})
 end
 
 
 function M.create_new_project()
-    local terminal_w = vim.o.columns
-    local terminal_h = vim.o.lines
-    local popup_w = 30
-    local popup_h = 1
-    local popup_x = math.floor((terminal_w - popup_w) / 2)
-    local popup_y = math.floor((terminal_h - popup_h) / 2)
-
-    -- Creating title read only window
-    local TITLE = "Project Name"
-    local title_buf = vim.api.nvim_create_buf(false, true)
-    local title_win = vim.api.nvim_open_win(title_buf, true, {
-        relative = 'editor',
-        width = popup_w,
-        height = 1,
-        col = popup_x,
-        row = popup_y - 2,
-        style = 'minimal',
-        border = 'single',
+    local title_win, win, buf = create_centered_window_with_title({
+        title = "Project Name",
+        text = nil,
+        popup_w = 30,
+        popup_h = 1,
+        can_edit_text = true,
     })
-    vim.api.nvim_buf_set_lines(title_buf, 0, -1, false, {TITLE})
-    vim.api.nvim_buf_set_option(title_buf, 'modifiable', false)
-    vim.api.nvim_buf_set_option(title_buf, 'buftype', 'nofile')
-
-    -- Creating pop-up
-    local buf = vim.api.nvim_create_buf(false, true)
-    local win = vim.api.nvim_open_win(buf, true, {
-        relative = 'editor',
-        width = popup_w,
-        height = popup_h,
-        col = popup_x,
-        row = popup_y,
-        style = 'minimal',
-        border = 'single',
-    })
-    vim.api.nvim_buf_set_option(buf, 'modifiable', true)
-    vim.api.nvim_buf_set_option(buf, 'buftype', 'nofile')
-    vim.api.nvim_command('startinsert')
 
     local function cancel()
-        vim.api.nvim_buf_del_keymap(buf, 'i', '<Esc>')
-        vim.api.nvim_buf_del_keymap(buf, 'i', '<C-c>')
-        vim.api.nvim_buf_del_keymap(buf, 'i', '<CR>')
-        vim.api.nvim_win_close(title_win, true)
-        vim.api.nvim_win_close(win, true)
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
+        destroy_prompt_window(buf, title_win, win)
     end
 
     local function confirm()
@@ -737,14 +780,7 @@ function M.create_new_project()
         local user_input = vim.api.nvim_buf_get_lines(buf, 0, -1, false)[1]
 
         -- Close the windows.
-        vim.api.nvim_buf_del_keymap(buf, 'i', '<Esc>')
-        vim.api.nvim_buf_del_keymap(buf, 'i', '<C-c>')
-        vim.api.nvim_buf_del_keymap(buf, 'i', '<CR>')
-        vim.api.nvim_win_close(title_win, true)
-        vim.api.nvim_win_close(win, true)
-        
-        -- Switch to Normal mode.
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
+        destroy_prompt_window(buf, title_win, win)
 
         -- Canceling if it is invalid
         if not is_filename_valid(user_input) then return end
@@ -764,9 +800,7 @@ function M.create_new_project()
         ctx.this_config = config_path
     end
 
-    vim.api.nvim_buf_set_keymap(buf, 'i', '<CR>',  '', { noremap = true, silent = true, callback = confirm })
-    vim.api.nvim_buf_set_keymap(buf, 'i', '<C-c>', '', { noremap = true, silent = true, callback = cancel  })
-    vim.api.nvim_buf_set_keymap(buf, 'i', '<Esc>', '', { noremap = true, silent = true, callback = cancel  })
+    create_prompt_window_bindings(buf, confirm, cancel)
 end
 
 
