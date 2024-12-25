@@ -32,7 +32,7 @@ local function make_default_config_file_header()
     return string.format("-- Project config file created at %s\n", current_date)
 end
 
-local DEFAULT_CONFIG_FILE_BODY = require("default-config-file")
+local DEFAULT_CONFIG_FILE_BODY = require("dumb-project.default-config-file")
 
 -- Helper functions
 -- ----------------------------------------------------------------------------------------------- --
