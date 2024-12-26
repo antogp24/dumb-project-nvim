@@ -90,22 +90,6 @@ local function table_size(t)
 end
 
 
-local function table_sliced(t, start, finish)
-    local size = table_size(t)
-    if finish == nil then finish = size end
-
-    if start < 1 or finish > size then return end
-
-    local result = {}
-
-    for i = start, finish do
-        table.insert(result, t[i])
-    end
-
-    return result
-end
-
-
 local function list_print(t, print_fn)
     if not print_fn then print_fn = print end
     local result = "{"
@@ -261,24 +245,31 @@ local function clear_this_attribs()
 end
 
 
-local function recursive_open_files_in_dir(dir_name, patterns, in_read_only)
-    -- Pre-compile patterns for better performance
-    local compiled_patterns = {}
-    for _, pattern in ipairs(patterns) do
-        table.insert(compiled_patterns, vim.regex(pattern))
+local function match_file_pattern(pattern, str)
+    local ending = pattern:sub(2, -1)
+    local str_len = str:len()
+    for i = 1, str_len do
+        local c = string.char(str:byte(i))
+        if c == "." and str:sub(i, str_len) == ending then
+            return true
+        end
     end
+    return false
+end
 
+
+local function recursive_open_files(dir_name, patterns, in_read_only)
     local function matches_patterns(filename)
-        for _, regex in ipairs(compiled_patterns) do
-            if regex:match_str(filename) then return true end
+        for _, pattern in ipairs(patterns) do
+            if match_file_pattern(pattern, filename) then
+                return true
+            end
         end
         return false
     end
 
-    local files_to_open = {}
-    
     -- Uses vim.loop (libuv) for faster directory traversal
-    local function collect_files(directory)
+    local function open_files_in(directory)
         local handle = vim.loop.fs_scandir(directory)
         while handle do
             local name, type = vim.loop.fs_scandir_next(handle)
@@ -287,22 +278,18 @@ local function recursive_open_files_in_dir(dir_name, patterns, in_read_only)
             local full_path = directory .. "/" .. name
             
             if type == "directory" then
-                collect_files(full_path)
+                open_files_in(full_path)
             elseif type == "file" and matches_patterns(name) then
-                table.insert(files_to_open, full_path)
+                if in_read_only then
+                    vim.cmd("view " .. full_path)
+                else
+                    vim.cmd("edit " .. full_path)
+                end
             end
         end
     end
 
-    collect_files(vim.fs.normalize(dir_name))
-
-    if #files_to_open > 0 then
-        if in_read_only then
-            vim.cmd("view " .. table.concat(files_to_open, " "))
-        else
-            vim.cmd("edit " .. table.concat(files_to_open, " "))
-        end
-    end
+    open_files_in(vim.fs.normalize(dir_name))
 end
 
 
@@ -680,6 +667,19 @@ function M.all_plugin_commands()
 end
 
 
+function M.unload()
+    ctx.this_path = nil
+    ctx.this_config = nil
+    ctx.this_file_patterns = nil
+    ctx.this_workspace = nil
+    ctx.this_build_commands = nil
+    clear_key_bindings()
+    close_saved_buffers()
+    vim.fn.chdir(PROJECTS_DIRECTORY)
+    netrw_open_dir(PROJECTS_DIRECTORY)
+end
+
+
 function M.load()
     local files = vim.fn.readdir(PROJECTS_DIRECTORY)
 
@@ -688,10 +688,10 @@ function M.load()
     local max_file_name_length = 0
 
     for _, filename in ipairs(files) do
-        if string.match(filename, ".*%.lua$") then
+        if filename:match(".*%.lua$") then
             table.insert(lua_files, filename)
-            if max_file_name_length < string.len(filename) then
-                max_file_name_length = string.len(filename)
+            if max_file_name_length < filename:len() then
+                max_file_name_length = filename:len()
             end
             lua_files_count = lua_files_count + 1
         end
@@ -738,6 +738,7 @@ function M.load()
 
     local function load_config()
         close_dialog()
+        M.unload()
 
         local config_filename = lua_files[current_index]
         ctx.this_config = PROJECTS_DIRECTORY .. config_filename
@@ -756,9 +757,9 @@ function M.load()
             return
         end
 
-        recursive_open_files_in_dir(workspace.working_dir, ctx.this_file_patterns)
-        for _,_ in ipairs(workspace.others) do
-            recursive_open_files_in_dir(workspace.working_dir, ctx.this_file_patterns, true)
+        recursive_open_files(workspace.working_dir, ctx.this_file_patterns)
+        for _,folder in ipairs(workspace.others) do
+            recursive_open_files(folder, ctx.this_file_patterns, true)
         end
 
         vim.fn.chdir(workspace.working_dir)
@@ -822,19 +823,6 @@ function M.open_config()
         return
     end
     vim.fn.execute("edit " .. ctx.this_config)
-end
-
-
-function M.unload()
-    ctx.this_path = nil
-    ctx.this_config = nil
-    ctx.this_file_patterns = nil
-    ctx.this_workspace = nil
-    ctx.this_build_commands = nil
-    clear_key_bindings()
-    close_saved_buffers()
-    vim.fn.chdir(PROJECTS_DIRECTORY)
-    netrw_open_dir(PROJECTS_DIRECTORY)
 end
 
 
