@@ -262,34 +262,47 @@ end
 
 
 local function recursive_open_files_in_dir(dir_name, patterns, in_read_only)
-    dir_name = vim.fs.normalize(dir_name)
-
     local function matches_patterns(filename)
-        for _, pattern in ipairs(patterns) do
-            if filename:match(pattern) then return true end
+        for _, regex in ipairs(compiled_patterns) do
+            if regex:match_str(filename) then return true end
         end
         return false
     end
 
-    local function traverse_directory(directory)
-        local contents = vim.fn.readdir(directory)
-        for _, filename in ipairs(contents) do
-            local full_path = directory .. "/" .. filename
-            local file_size = vim.fn.getfsize(full_path)
+    -- Pre-compile patterns for better performance
+    local compiled_patterns = {}
+    for _, pattern in ipairs(patterns) do
+        table.insert(compiled_patterns, vim.regex(pattern))
+    end
 
-            if vim.fn.isdirectory(full_path) == 1 then
-                traverse_directory(full_path)
-            elseif matches_patterns(filename) then
-                if in_read_only then
-                    vim.cmd('view ' .. full_path)
-                else
-                    vim.cmd('edit ' .. full_path)
-                end
+    local files_to_open = {}
+    
+    -- Uses vim.loop (libuv) for faster directory traversal
+    local function collect_files(directory)
+        local handle = vim.loop.fs_scandir(directory)
+        while handle do
+            local name, type = vim.loop.fs_scandir_next(handle)
+            if not name then break end
+
+            local full_path = directory .. "/" .. name
+            
+            if type == "directory" then
+                collect_files(full_path)
+            elseif type == "file" and matches_patterns(name) then
+                table.insert(files_to_open, full_path)
             end
         end
     end
 
-    traverse_directory(dir_name)
+    collect_files(vim.fs.normalize(dir_name))
+
+    if #files_to_open > 0 then
+        if in_read_only then
+            vim.cmd("view " .. table.concat(files_to_open, " "))
+        else
+            vim.cmd("edit " .. table.concat(files_to_open, " "))
+        end
+    end
 end
 
 
@@ -723,13 +736,12 @@ function M.load()
         destroy_navigation_window(buf, title_win, win)
     end
 
-    local function open_config()
+    local function load_config()
+        close_dialog()
+
         local config_filename = lua_files[current_index]
         ctx.this_config = PROJECTS_DIRECTORY .. config_filename
-
         vim.fn.execute("edit " .. ctx.this_config)
-        close_dialog()
-        vim.fn.execute("buffer " .. ctx.this_config)
         vim.api.nvim_command('luafile %')
 
         if not is_active() then 
@@ -756,7 +768,7 @@ function M.load()
         create_key_bindings(ctx.this_build_commands)
     end
 
-    create_navigation_window_bindings(buf, move_up, move_down, open_config, close_dialog)
+    create_navigation_window_bindings(buf, move_up, move_down, load_config, close_dialog)
 
     vim.api.nvim_win_set_cursor(win, {current_index, 0})
 end
