@@ -83,7 +83,7 @@ end
 
 local function table_size(t)
     local count = 0
-    for _,_ in ipairs(t) do
+    for _,_ in pairs(t) do
         count = count + 1
     end
     return count
@@ -148,7 +148,7 @@ local function async_command_run(command_str)
     })
 
     -- Printing the full command
-    vim.api.nvim_out_write(shell_name)
+    vim.api.nvim_out_write(shell_name .. ' ')
     for _,arg in ipairs(shell_args) do
         vim.api.nvim_out_write(arg .. ' ')
     end
@@ -182,17 +182,21 @@ local function validate_workspace(workspace)
         error("The attribute workspace must be a table")
         return false
     end
-    if workspace["working_dir"] == nil or type(workspace["working_dir"]) ~= "string" then
+    if workspace.working_dir == nil or type(workspace.working_dir) ~= "string" then
         error([[The table workspace must have an attribute "working_dir", which must be a string.]])
         return false
     end
-    if workspace["others"] == nil or type(workspace["others"]) ~= "table" then
+    if workspace.others == nil or type(workspace.others) ~= "table" then
         error([[The table workspace must have an attribute "others", which must be a table.]])
         return false
     end
-    for _,v in ipairs(workspace["others"]) do
+    for _,v in ipairs(workspace.others) do
         if type(v) ~= "string" then
-            error('Expected strings in workspace["others"].')
+            error('Expected strings in workspace.others.')
+            return false
+        end
+        if v == workspace.working_dir then
+            error('The table workspace.others can not have workspace.working_dir inside it.')
             return false
         end
     end
