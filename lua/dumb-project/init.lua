@@ -262,17 +262,17 @@ end
 
 
 local function recursive_open_files_in_dir(dir_name, patterns, in_read_only)
+    -- Pre-compile patterns for better performance
+    local compiled_patterns = {}
+    for _, pattern in ipairs(patterns) do
+        table.insert(compiled_patterns, vim.regex(pattern))
+    end
+
     local function matches_patterns(filename)
         for _, regex in ipairs(compiled_patterns) do
             if regex:match_str(filename) then return true end
         end
         return false
-    end
-
-    -- Pre-compile patterns for better performance
-    local compiled_patterns = {}
-    for _, pattern in ipairs(patterns) do
-        table.insert(compiled_patterns, vim.regex(pattern))
     end
 
     local files_to_open = {}
