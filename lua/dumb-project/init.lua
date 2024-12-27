@@ -11,13 +11,24 @@ local ctx = {
     created_bindings = {},
     plugin_commands = {},
     plugin_commands_count = 0,
+    user_config = {
+        file_explorer_command = "Explore" -- Netrw by default.
+    }
 }
 
 
 -- Directory where project files are stored.
 -- ----------------------------------------------------------------------------------------------- --
 
-local PROJECTS_DIRECTORY = vim.fs.normalize(vim.fn.stdpath('config')) .. '/dumb-project/'
+local function get_config_path()
+    local one_or_many = vim.fn.stdpath('config')
+    if type(one_or_many) == "string" then
+        return vim.fs.normalize(one_or_many)
+    end
+    return vim.fs.normalize(one_or_many[1])
+end
+
+local PROJECTS_DIRECTORY = get_config_path() .. '/dumb-project/'
 
 if vim.fn.isdirectory(PROJECTS_DIRECTORY) ~= 1 then
     vim.fn.mkdir(PROJECTS_DIRECTORY, 'p')
@@ -43,50 +54,12 @@ local function log_msg(message, no_newline)
         error("Error: Could not open log file for writing.")
         return
     end
-    if no_newline then 
+    if no_newline then
         file:write(tostring(message))
     else
         file:write(tostring(message) .. "\n")
     end
     file:close()
-end
-
-
-local function file_exists(path)
-    return vim.loop.fs_stat(path) and vim.loop.fs_stat(path).type == 'file'
-end
-
-
-local function netrw_open_dir(dir_path)
-    if vim.fn.isdirectory(dir_path) ~= 1 then
-        error('Could not open the directory: ' .. dir_path)
-        return
-    end
-    vim.cmd('Explore ' .. dir_path)
-end
-
-
-local function close_saved_buffers()
-    local buffers = vim.api.nvim_list_bufs()
-    for _, buf in ipairs(buffers) do
-        vim.api.nvim_buf_delete(buf, { force = false })
-    end
-end
-
-
-local function clamp(value, a, b)
-    if value < a then return a
-    elseif value > b then return b
-    else return value end
-end
-
-
-local function table_size(t)
-    local count = 0
-    for _,_ in pairs(t) do
-        count = count + 1
-    end
-    return count
 end
 
 
@@ -121,6 +94,45 @@ local function table_print(t, print_fn, indent)
 end
 
 
+local function file_exists(path)
+    local stat = vim.uv.fs_stat(path)
+    return stat and stat.type == 'file'
+end
+
+
+local function explore_dir(dir_path, file_explorer_command)
+    if vim.fn.isdirectory(dir_path) ~= 1 then
+        error('Could not open the directory: ' .. dir_path)
+        return
+    end
+    vim.cmd(file_explorer_command .. ' ' .. dir_path)
+end
+
+
+local function close_saved_buffers()
+    local buffers = vim.api.nvim_list_bufs()
+    for _, buf in ipairs(buffers) do
+        vim.api.nvim_buf_delete(buf, { force = false })
+    end
+end
+
+
+local function clamp(value, a, b)
+    if value < a then return a
+    elseif value > b then return b
+    else return value end
+end
+
+
+local function table_size(t)
+    local count = 0
+    for _,_ in pairs(t) do
+        count = count + 1
+    end
+    return count
+end
+
+
 -- On unix:   bash -i -c '<command> ; read -p "Press Enter to exit..."'
 -- On win32:  cmd /K "<command> && pause"
 
@@ -139,13 +151,21 @@ local function async_command_run(command_str)
         table.insert(shell_args, '"' .. command_str .. " && pause\"")
     end
 
+    local stdin  = vim.uv.new_pipe()
+    local stdout = vim.uv.new_pipe()
+    local stderr = vim.uv.new_pipe()
+
     vim.uv.spawn(shell_name, {
         args = shell_args,
         stdio = {stdin, stdout, stderr},
         verbatim = true,
         detached = true,
+        hide = false,
         cwd = vim.fn.getcwd(),
-    })
+        env = vim.fn.environ(),
+    }, function(code, signal)
+        print("Finished with exit code", code, "and signal", signal)
+    end)
 
     -- Printing the full command
     vim.api.nvim_out_write(shell_name .. ' ')
@@ -272,15 +292,15 @@ local function recursive_open_files(dir_name, patterns, in_read_only)
         return false
     end
 
-    -- Uses vim.loop (libuv) for faster directory traversal
+    -- Uses libUV for faster directory traversal
     local function open_files_in(directory)
-        local handle = vim.loop.fs_scandir(directory)
+        local handle = vim.uv.fs_scandir(directory)
         while handle do
-            local name, type = vim.loop.fs_scandir_next(handle)
+            local name, type = vim.uv.fs_scandir_next(handle)
             if not name then break end
 
             local full_path = directory .. "/" .. name
-            
+
             if type == "directory" then
                 open_files_in(full_path)
             elseif type == "file" and matches_patterns(name) then
@@ -360,8 +380,8 @@ local function create_centered_window_with_title(args)
         border = 'single',
     })
     vim.api.nvim_buf_set_lines(title_buf, 0, -1, false, {args.title})
-    vim.api.nvim_buf_set_option(title_buf, 'modifiable', false)
-    vim.api.nvim_buf_set_option(title_buf, 'buftype', 'nofile')
+    vim.api.nvim_set_option_value('modifiable', false, {buf = title_buf})
+    vim.api.nvim_set_option_value('buftype', 'nofile', {buf = title_buf})
 
     -- Creating pop-up
     local buf = vim.api.nvim_create_buf(false, true)
@@ -379,7 +399,7 @@ local function create_centered_window_with_title(args)
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, args.text)
     end
 
-    vim.api.nvim_buf_set_option(buf, 'modifiable', args.can_edit_text)
+    vim.api.nvim_set_option_value('modifiable', args.can_edit_text, {buf = buf})
 
     if args.can_edit_text then
         vim.api.nvim_command('startinsert')
@@ -471,8 +491,8 @@ create_command('OpenConfig', function()
     require("dumb-project").open_config()
 end)
 
-create_command('OpenProjectsDirNetrw', function()
-    require("dumb-project").netrw_open_projects_dir()
+create_command('OpenProjectsDir', function()
+    require("dumb-project").open_projects_dir()
 end)
 
 
@@ -483,7 +503,22 @@ end)
 local M = {}
 
 
-function M.setup(file_patterns, workspace, build_commands)
+function M.setup(opts)
+    if opts == nil then opts = {} end
+    for name,value in pairs(opts) do
+        if name == "file_explorer_command" then
+            ctx.user_config.file_explorer_command = value
+        else
+            error("Unexpected option '" .. name .. [[' in require('dumb-project').setup(opts).
+            Accepted options are:
+                - opts.file_explorer_command: string (defaults to "Explore")
+            ]])
+        end
+    end
+end
+
+
+function M.setup_config(file_patterns, workspace, build_commands)
     clear_this_attribs()
 
     if validate_file_patterns(file_patterns) then
@@ -618,7 +653,7 @@ function M.all_plugin_commands()
     local max_name_length = 0
     local plugin_command_names = {}
     local plugin_command_functions = {}
-    for i,v in ipairs(ctx.plugin_commands) do
+    for _,v in ipairs(ctx.plugin_commands) do
         table.insert(plugin_command_names, v.name)
         table.insert(plugin_command_functions, v.fn)
         local name_length = string.len(v.name)
@@ -680,7 +715,7 @@ function M.unload()
     clear_key_bindings()
     close_saved_buffers()
     vim.fn.chdir(PROJECTS_DIRECTORY)
-    netrw_open_dir(PROJECTS_DIRECTORY)
+    explore_dir(PROJECTS_DIRECTORY, ctx.user_config.file_explorer_command)
 end
 
 
@@ -749,15 +784,15 @@ function M.load()
         vim.fn.execute("edit " .. ctx.this_config)
         vim.api.nvim_command('luafile %')
 
-        if not is_active() then 
-            error("At the end in " .. ctx.this_config .. " you must call the setup function.")
+        if not is_active() then
+            error("At the end in " .. ctx.this_config .. " you must call the setup_config function.")
             return
         end
 
         local workspace = ctx.this_workspace
 
         if vim.fn.isdirectory(workspace.working_dir) ~= 1 then
-            error(build.working_dir .. " is not a valid directory.")
+            error(workspace.working_dir .. " is not a valid directory.")
             return
         end
 
@@ -812,7 +847,7 @@ function M.create_new_project()
             config_file:write(DEFAULT_CONFIG_FILE_BODY)
             config_file:close()
         end
-        
+
         vim.fn.execute("edit " .. config_path)
         ctx.this_config = config_path
     end
@@ -830,8 +865,8 @@ function M.open_config()
 end
 
 
-function M.netrw_open_projects_dir()
-    netrw_open_dir(PROJECTS_DIRECTORY)
+function M.open_projects_dir()
+    explore_dir(PROJECTS_DIRECTORY, ctx.user_config.file_explorer_command)
 end
 
 
@@ -852,7 +887,7 @@ function M.get_folder_of_current_file()
             last_slash_index = i
         end
     end
-    
+
     if last_slash_index == nil then
         return "."
     end
