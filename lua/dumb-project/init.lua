@@ -133,8 +133,8 @@ local function table_size(t)
 end
 
 
--- On unix:   bash -i -c '<command> ; read -p "Press Enter to exit..."'
--- On win32:  cmd /K "<command> && pause"
+-- On unix:   bash -i -c '<command>'
+-- On win32:  cmd /K "<command>"
 
 local function async_command_run(command_str)
     local shell_name = nil
@@ -144,11 +144,11 @@ local function async_command_run(command_str)
         shell_name = vim.fn.getenv('SHELL'):match("([^/]+)$")
         table.insert(shell_args, "-i")
         table.insert(shell_args, "-c")
-        table.insert(shell_args, "'" .. command_str .. " ; read -p \"Press Enter to exit...\"'")
+        table.insert(shell_args, "'" .. command_str .. "'")
     elseif vim.fn.has("win32") == 1 then
         shell_name = "cmd"
         table.insert(shell_args, "/k")
-        table.insert(shell_args, '"' .. command_str .. " && pause\"")
+        table.insert(shell_args, '"' .. command_str .. '"')
     end
 
     local stdin  = vim.uv.new_pipe()

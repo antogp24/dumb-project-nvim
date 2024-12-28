@@ -4,7 +4,7 @@ local project = require('dumb-project')
 
 -- List of accepted file patterns.
 
-file_patterns = {
+local file_patterns = {
     "*.c",
     "*.odin",
     "*.glsl",
@@ -13,13 +13,14 @@ file_patterns = {
 }
 
 -- List of folders to recursively scan.
+-- Unfortunately things like ~ don't work.
 
-workspace = {
+local workspace = {
     working_dir = "~/dev/project",
     others = {
-        "~/libs/library1",
-        "~/libs/library2",
-        "~/libs/library3",
+        "/home/user/libs/library1",
+        "/home/user/libs/library2",
+        "/home/user/libs/library3",
     },
 }
 
@@ -28,7 +29,7 @@ workspace = {
 -- The require('dumb-project').cmd function assists with creating commands by allowing strings and functions that return strings. 
 -- The default working_dir for all commands is the workspace.working_dir.
 
-build_commands = {
+local build_commands = {
     {
         cmdname = "Build",
         command = project.cmd("build.bat"),
@@ -36,18 +37,18 @@ build_commands = {
     },
     {
         cmdname = "RunFile",
-        command = project.cmd("odin run ", project.get_current_file, " -file"),
+        command = project.cmd("odin run", project.get_current_file, " -file"),
         binding = "<F6>",
     },
     {
         cmdname = "CompileLibrary1",
         command = project.cmd("make && sudo make install"),
         binding = "<F6>",
-        working_dir = "~/libs/library1",
+        working_dir = "/home/user/libs/library1",
     },
 }
 
 -- Must call this function to use all the tables defined previously.
-project.setup(file_patterns, workspace, build_commands)
+project.setup_config(file_patterns, workspace, build_commands)
 
 ]]
